@@ -11,6 +11,7 @@ import logging
 import telegram
 from telegram import InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import Updater, CommandHandler, CallbackQueryHandler
+from QuinielaScrapper import QuinielaScrapper
 
 reload(sys)
 sys.setdefaultencoding('utf8')
@@ -22,7 +23,7 @@ logging.basicConfig(format='%(asctime)s - %(name)s - %(levelname)s - %(message)s
 #### GLOBAL STATUS VARIABLES ####
 counter = 1
 status_name = "status.json"
-
+admin_id = "132976650"
 
 #### KEYBOARDS ####
 keyboard = [[InlineKeyboardButton("1", callback_data='1'),
@@ -61,16 +62,29 @@ def write_status(status):
     json.dump(status, f)
 
 def get_journey_matches():
-    global partidos
-    return partidos
+    scrapper = QuinielaScrapper()
+    status = read_status()
+    journey = scrapper.get_journey(status["journey"])
+
+    matches, results = [], []
+
+    for journey_match in journey:
+        matches.append(journey_match["match"])
+        results.append(journey_match["result"])
+
+    # DEBUG variable
+    #results = ["1", "1", "1", "1", "1", "1", "1", "1", "1", "1", "1", "1", "1", "1", "1 - M"]
+    return matches, results
 
 def echa_la_puta_quiniela(bot, update):
-    journey_matches = get_journey_matches()
+    global admin_id
+    journey_matches, _ = get_journey_matches()
     status = read_status()
 
     table_mid = """
     \\documentclass{beamer}
     \\usepackage{xcolor}
+    \\usepackage[utf8]{inputenc}
     \\usepackage{colortbl}
 
     \\definecolor{Gray}{gray}{0.85}
@@ -78,6 +92,20 @@ def echa_la_puta_quiniela(bot, update):
     \\begin{document}
     \\begin{frame}
 """
+
+    # Check if is admin
+    if str(update.message.from_user.id) != admin_id:
+        bot.send_message(
+            chat_id=update.message.chat_id,
+            text='ERROR: ¡la puta quiniela solo la puede echar Jorge!.')
+        return 
+
+    # Check if state is filling
+    if status["state"] != "filling":
+        bot.send_message(
+            chat_id=update.message.chat_id,
+            text='ERROR: la puta quiniela se echa después de rellenar columnas, ¡no ahora gilipollas!.')
+        return
 
     # Table header
     table_mid += "\\begin{tabular}{ |>{\columncolor{Gray}} c | >{\columncolor{Gray}}r |"
@@ -114,12 +142,74 @@ def echa_la_puta_quiniela(bot, update):
     os.system("convert -density 300 -trim tmp_table.pdf -quality 100 tmp_table.png")
     bot.send_photo(chat_id=update.message.chat_id, photo=open('tmp_table.png', 'rb'))
 
+    # Change current state to "playing"
+    status = read_status()
+    status["state"] = "playing"
+    write_status(status)
+
+def jornada(bot, update, args):
+    status = read_status()
+
+    # Check if is admin
+    if str(update.message.from_user.id) != admin_id:
+        bot.send_message(
+            chat_id=update.message.chat_id,
+            text='ERROR: solo Jorge puede empezar nueva jornada capullo.')
+        return 
+
+    # Check if state is finished
+    if status["state"] != "finished":
+        bot.send_message(
+            chat_id=update.message.chat_id,
+            text='ERROR: la jornada tiene que haberse terminado para poder ejecutar este comando y comenzar una nueva quiniela.')
+        return
+
+    # No journey provided
+    if len(args) == 0:
+        bot.send_message(
+            chat_id=update.message.chat_id,
+            text='ERROR: especifica la jornada.')
+        return
+
+    # Check if journey is available
+    journey = str(args[0])
+    scraper = QuinielaScrapper()
+    if not scraper.is_journey_available(journey):
+        bot.send_message(
+            chat_id=update.message.chat_id,
+            text='ERROR: no hay quiniela para esa jornada.')
+        return
+
+    # Refresh status JSON
+    status["journey"] = journey
+    status["state"] = "journey_ready"
+    status["fills"] = {}
+    write_status(status)
+
+    # Retrieve journey matches, and send them
+    matches, _ = get_journey_matches()
+    msg_str = "Jornada %s:\n" % journey
+    for i, match in zip(range(1, 16), matches):
+        msg_str += "%d. %s\n" % (i, match)
+    bot.send_message(
+        chat_id=update.message.chat_id,
+        text=msg_str
+    )
+
+
 def editar(bot, update, args):
-    journey_matches = get_journey_matches()
+    journey_matches, _ = get_journey_matches()
     match_num = None
     query = update.callback_query
     status = read_status()
     user = update.message.from_user
+
+    # Check if state is filling
+    if status["state"] != "filling":
+        bot.send_message(
+            chat_id=update.message.chat_id,
+            text='ERROR: ahora no puedes editar ninguna columna.')
+        return
 
     # No match provided
     if len(args) == 0:
@@ -154,7 +244,7 @@ def editar(bot, update, args):
 
 
 def editar_partido(bot, update):
-    journey_matches = get_journey_matches()
+    journey_matches, _ = get_journey_matches()
 
     query = update.callback_query
     fill_answer = query.data
@@ -180,11 +270,71 @@ def editar_partido(bot, update):
         text=confirm_message)
 
 
+def status(bot, update):
+    status = read_status()
+    users_results = []
+    finished_matches = 0
+
+    # Quiniela is yet to be filled by other users
+    if status["state"] == "filling":
+        msg = "La quiniela aún no se ha echado.\nDe momento la han rellenado:\n"
+        for user_id in status["fills"].keys():
+            msg += "%s, " % status["fills"][user_id]["nick"]
+        msg = msg[:-1]
+        msg += "\nRellena tu columna ejecutando: \\start"
+
+        bot.send_message(
+            text=msg,
+            chat_id=update.message.chat_id,
+        )
+        return
+    # Listening for fillings
+    if status["state"] == "journey_ready":
+        bot.send_message(
+            text="Esperando a columnas rellenas (usa /start). Jornada %s" % str(status["journey"]),
+            chat_id=update.message.chat_id,
+        )
+        return
+
+    journey_matches, results = get_journey_matches()
+
+    # Retrieve the users' guessed matches
+    print "Results: %s" % str(results)
+    for result in results:
+        finished_matches += 1 if result != "" and result != " - " else 0
+    for user_id in status["fills"].keys():
+        user_nick = status["fills"][user_id]["nick"]
+        user_fills = status["fills"][user_id]["fill"]
+        ok_guess = 0
+
+        for result, user_fill in zip(results, user_fills):
+            if (" - " in result and ok_guess == 14) or " - " not in result:
+                ok_guess += 1 if result.lower() == user_fill.lower() else 0
+
+        users_results.append({"nick": user_nick, "ok_guess": ok_guess})
+
+    # Create string message
+    status_str = "Aciertos de partidos terminados:\n"
+    for user_results in users_results:
+        status_str += " -> %s: %d/%d\n" % (user_results["nick"], user_results["ok_guess"], finished_matches)
+    if finished_matches == 15:
+        status_str += "Jornada terminada."
+        status["state"] = "finished"
+        write_status(status)
+
+    # Send message
+    bot.send_message(
+        text=status_str,
+        chat_id=update.message.chat_id,
+    )
+
+
 def rellenar(bot, update):
     match_to_fill = None
     ask_more = True
     next_message = ''
-    journey_matches = get_journey_matches()
+    journey_matches, _ = get_journey_matches()
+    print "journey_matches=%s" % journey_matches
 
     query = update.callback_query
     fill_answer = query.data
@@ -262,9 +412,22 @@ def rellenar(bot, update):
 
 
 def start(bot, update):
-    journey_matches = get_journey_matches()
+    status = read_status()
+
+    # Check if state is journey_ready
+    if status["state"] != "journey_ready" and status["state"] != "filling":
+        bot.send_message(
+            chat_id=update.message.chat_id,
+            text='ERROR: ya hay una quiniela en juego, ahora no puedes comenzar otra.')
+        return
+
+    journey_matches, _ = get_journey_matches()
     update.message.reply_text(text="1. ➡%s⬅\n" % journey_matches[0],
            reply_markup=reply_markup_keyboard)
+
+    # Update state
+    status["state"] = "filling"
+    write_status(status)
 
 
 def button(bot, update):
@@ -287,6 +450,36 @@ def button(bot, update):
     #                       chat_id=query.message.chat_id,
     #                       message_id=query.message.message_id)
 
+def reset(bot, update, args):
+    # Check if is admin
+    if str(update.message.from_user.id) != admin_id:
+        bot.send_message(
+            chat_id=update.message.chat_id,
+            text='ERROR: solo Jorge puede resetear hijo de puta.')
+        return
+
+    # Check argument
+    if len(args) != 1:
+        bot.send_message(
+            chat_id=update.message.chat_id,
+            text='ERROR: pasa por argumento la jornada desde la que resetear.')
+        return     
+
+    # Update status
+    status = read_status()
+    status["fills"] = {}
+    status["state"] = "finished"
+    status["journey"] = str(args[0])
+    status["state"] = "journey_ready"
+    write_status(status)
+
+    bot.send_message(
+        chat_id=update.message.chat_id,
+        text='Reseteado. Ahora estamos en la jornada 10.')
+    return    
+
+    return
+
 
 def help(bot, update):
     update.message.reply_text("Use /start to test this bot.")
@@ -302,6 +495,9 @@ updater = Updater("402086176:AAHgHTqknzeHPWBjPDJYJLdG38CQwFNR6W4")
 updater.dispatcher.add_handler(CommandHandler('start', start))
 updater.dispatcher.add_handler(CallbackQueryHandler(rellenar))
 updater.dispatcher.add_handler(CommandHandler('edit', editar, pass_args=True))
+updater.dispatcher.add_handler(CommandHandler('jornada', jornada, pass_args=True))
+updater.dispatcher.add_handler(CommandHandler('reset', reset, pass_args=True))
+updater.dispatcher.add_handler(CommandHandler('status', status))
 updater.dispatcher.add_handler(CommandHandler('echa_la_puta_quiniela',
     echa_la_puta_quiniela))
 updater.dispatcher.add_handler(CommandHandler('help', help))

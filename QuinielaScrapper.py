@@ -1,6 +1,10 @@
 from bs4 import BeautifulSoup
 import requests
 import re
+import sys
+
+reload(sys)
+sys.setdefaultencoding('utf8')
 
 class QuinielaScrapper:
     """Web scrapper to get 4chan thread messages"""
@@ -10,10 +14,59 @@ class QuinielaScrapper:
     def __init__(self):
         """Creates the scraper
         """
-        self.url = 'http://4chan.org/'
-        self.boardsURL = 'http://boards.4chan.org/'
-        self.latestThread = None
+        self.url = "https://resultados.as.com/quiniela/2017_2018/"
         self.scraper = None
+
+    def is_journey_available(self, journey):
+        journey_url = self.url + "jornada_" + str(journey)
+        quiniela_page = requests.get(journey_url)
+        quiniela_page_text = quiniela_page.text
+        self.scraper = BeautifulSoup(quiniela_page_text, "lxml")
+
+        return len(self.scraper.select('div.p404')) == 0
+
+
+    def get_journey(self, journey):
+        partidos = []
+
+        journey_url = self.url + "jornada_" + str(journey)
+        print "try with: %s" % journey_url
+        quiniela_page = requests.get(journey_url)
+        quiniela_page_text = quiniela_page.text
+        self.scraper = BeautifulSoup(quiniela_page_text, "lxml") 
+        cont_partidos = self.scraper.select('div.cont-partido')
+
+        # Loop through each match and retrieve results
+        for cont_partido in cont_partidos:
+            num = cont_partido.select('span.pos')[0].text
+            local, visitante, pronostico = "", "", ""
+
+            if num == "15.":
+                local = cont_partido.select('a.visitante')[0].select('span.nombre-equipo')[0].text
+                visitante = cont_partido.select('a.visitante')[1].select('span.nombre-equipo')[0].text
+                pronostico1, pronostico2 = "", ""
+                try:
+                    pronostico1 = cont_partido.select('span.finalizado')[0].text
+                    pronostico2 = cont_partido.select('span.finalizado')[1].text
+                except IndexError:
+                    pass
+                pronostico = "%s - %s" % (pronostico1, pronostico2)
+            else:
+                local = cont_partido.select('a.local')[0].select('span.nombre-equipo')[0].text
+                visitante = cont_partido.select('a.visitante')[0].select('span.nombre-equipo')[0].text
+                try:
+                    pronostico = cont_partido.select('span.cont-pronosticos')[0].select('span.finalizado')[0].text
+                except IndexError:
+                    pass
+
+            print "%s %s - %s: %s" % (num, local, visitante, pronostico)
+            partidos.append({
+                "match": "%s - %s" % (local, visitante),
+                "result": pronostico
+            })
+
+        return partidos
+
 
     def getFirstAtBoard(self, board):
         """Gets OP's message of first thread in the board
@@ -59,7 +112,7 @@ class QuinielaScrapper:
             
 
 if __name__ == '__main__':
-    scrap = FourChanScrapper()
-    reto = scrap.getFirstAtBoard('pol')
-    print(reto)
+    scrapper = QuinielaScrapper()
+    scrapper.get_journey(10)
+
 
